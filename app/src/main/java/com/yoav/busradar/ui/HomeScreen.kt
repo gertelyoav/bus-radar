@@ -11,7 +11,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +43,9 @@ import com.yoav.busradar.data.Bus
 import com.yoav.busradar.data.BusRepository
 import com.yoav.busradar.data.RouteInfo
 import com.yoav.busradar.data.RouteStop
+import com.yoav.busradar.data.ageText
+import com.yoav.busradar.data.clockTime
+import android.content.Context
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -46,8 +56,26 @@ import com.yoav.busradar.map.BusMap
 import kotlinx.coroutines.launch
 import java.time.Instant
 
-/** Default search radius, per the plan. Becomes user-adjustable in version 3. */
+/** Default search radius, per the plan. The user can change it; the choice is remembered. */
 const val DEFAULT_RADIUS_KM = 1.0
+
+/** Radius choices offered to the user, in km. */
+val RADIUS_OPTIONS = listOf(0.5, 1.0, 2.0, 3.0, 5.0)
+
+private const val PREFS = "bus-radar"
+private const val PREF_RADIUS = "radius_km"
+
+private fun loadRadius(context: Context): Double =
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        .getFloat(PREF_RADIUS, DEFAULT_RADIUS_KM.toFloat()).toDouble()
+        .takeIf { it in RADIUS_OPTIONS } ?: DEFAULT_RADIUS_KM
+
+private fun saveRadius(context: Context, km: Double) {
+    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat(PREF_RADIUS, km.toFloat()).apply()
+}
+
+private fun radiusLabel(km: Double): String =
+    if (km < 1) "${(km * 1000).toInt()} מ׳" else "${km.toInt()} ק״מ"
 
 /** Auto refresh interval while the app is on screen, per the plan. */
 const val REFRESH_INTERVAL_MS = 30_000L
@@ -73,6 +101,18 @@ fun HomeScreen() {
     var lineMode by remember { mutableStateOf<Long?>(null) }
     var routeStops by remember { mutableStateOf<List<RouteStop>>(emptyList()) }
     var fitRoute by remember { mutableIntStateOf(0) }
+    var radiusKm by remember { mutableStateOf(loadRadius(context)) }
+    var radiusMenuOpen by remember { mutableStateOf(false) }
+    // Line numbers the user picked to show (empty = show all lines). Radius view only.
+    var lineFilter by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Ticks every second so "updated ... ago" and the colours stay current between refreshes.
+    var clock by remember { mutableStateOf(Instant.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            clock = Instant.now()
+        }
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val launcher = rememberLauncherForActivityResult(
@@ -104,7 +144,7 @@ fun HomeScreen() {
                 val fresh = if (line != null) {
                     repository.busesOnLine(line, now)
                 } else {
-                    repository.busesAround(loc.latitude, loc.longitude, DEFAULT_RADIUS_KM, now)
+                    repository.busesAround(loc.latitude, loc.longitude, radiusKm, now)
                 }
                 if (gen != generation) return@launch
                 buses = fresh
@@ -134,6 +174,14 @@ fun HomeScreen() {
     }
 
     val selectedBus = buses.firstOrNull { it.vehicleRef == selected }
+    fun lineNumberOf(bus: Bus): String? = bus.lineRef?.let { routes[it]?.lineNumber }
+    val linesHere = buses.mapNotNull { lineNumberOf(it) }.distinct()
+        .sortedWith(compareBy({ it.takeWhile(Char::isDigit).toIntOrNull() ?: Int.MAX_VALUE }, { it }))
+    val shownBuses = if (lineMode == null && lineFilter.isNotEmpty()) {
+        buses.filter { lineNumberOf(it) in lineFilter || it.vehicleRef == selected }
+    } else {
+        buses
+    }
 
     // Draw the route of the selected bus's line, or of the line being followed.
     val routeLineRef = lineMode ?: selectedBus?.lineRef
@@ -167,7 +215,30 @@ fun HomeScreen() {
             floatingActionButton = {
                 if (permitted) {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.End) {
-                        SmallFloatingActionButton(onClick = { recenter++ }) { Text("◎") }
+                        if (lineMode == null) {
+                        Box {
+                            SmallFloatingActionButton(onClick = { radiusMenuOpen = true }) {
+                                Text(radiusLabel(radiusKm), modifier = Modifier.padding(horizontal = 8.dp))
+                            }
+                            DropdownMenu(expanded = radiusMenuOpen, onDismissRequest = { radiusMenuOpen = false }) {
+                                RADIUS_OPTIONS.forEach { km ->
+                                    DropdownMenuItem(
+                                        text = { Text("רדיוס ${radiusLabel(km)}") },
+                                        onClick = {
+                                            radiusMenuOpen = false
+                                            if (km != radiusKm) {
+                                                radiusKm = km
+                                                saveRadius(context, km)
+                                                recenter++
+                                                refresh()
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    SmallFloatingActionButton(onClick = { recenter++ }) { Text("◎") }
                         SmallFloatingActionButton(onClick = { refresh() }) {
                             if (loading) {
                                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -182,11 +253,12 @@ fun HomeScreen() {
             Box(Modifier.fillMaxSize().padding(padding)) {
                 BusMap(
                     location = location,
-                    radiusKm = DEFAULT_RADIUS_KM,
+                    radiusKm = radiusKm,
                     recenterRequests = recenter,
-                    buses = buses,
+                    buses = shownBuses,
                     routes = routes,
-                    now = fetchedAt,
+                    // Colours update every 5 s; finer would redraw the map for nothing.
+                    now = Instant.ofEpochSecond(clock.epochSecond / 5 * 5),
                     selectedVehicle = selected,
                     onBusClick = { selected = it },
                     routeStops = routeStops,
@@ -197,7 +269,7 @@ fun HomeScreen() {
                     BusDetails(
                         bus = selectedBus,
                         route = selectedBus.lineRef?.let { routes[it] },
-                        now = Instant.now(),
+                        now = clock,
                         inLineMode = lineMode != null,
                         onShowLine = selectedBus.lineRef?.let { ref -> { enterLineMode(ref) } },
                         onClose = { selected = null },
@@ -210,6 +282,7 @@ fun HomeScreen() {
                         error != null -> error!!
                         loading && buses.isEmpty() -> "טוען אוטובוסים…"
                         lineMode != null -> "קו ${lineName ?: ""}: ${buses.size} אוטובוסים בדרך"
+                        lineFilter.isNotEmpty() -> "${shownBuses.size} מתוך ${buses.size} אוטובוסים ברדיוס"
                         else -> "${buses.size} אוטובוסים ברדיוס"
                     }
                     StatusBar(
@@ -218,6 +291,17 @@ fun HomeScreen() {
                         onExitLine = if (lineMode != null) ({ exitLineMode() }) else null,
                         modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
                     )
+                    if (lineMode == null && linesHere.isNotEmpty() && selectedBus == null) {
+                        LineFilterRow(
+                            lines = linesHere,
+                            picked = lineFilter,
+                            onToggle = { line ->
+                                lineFilter = if (line in lineFilter) lineFilter - line else lineFilter + line
+                            },
+                            onClear = { lineFilter = emptySet() },
+                            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, end = 72.dp, bottom = 12.dp),
+                        )
+                    }
                 }
                 if (!permitted && asked) {
                     PermissionNeeded(onRetry = askPermission, modifier = Modifier.align(Alignment.Center))
@@ -288,7 +372,10 @@ private fun BusDetails(
             }
             route?.destination?.let { Text("יעד: $it", style = MaterialTheme.typography.bodyLarge) }
             route?.operator?.let { Text("מפעיל: $it", style = MaterialTheme.typography.bodyMedium) }
-            Text(updatedAgo(bus, now), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "מיקום עודכן ב־${clockTime(bus.recordedAt)} (לפני ${ageText(bus.recordedAt, now)} דק׳)",
+                style = MaterialTheme.typography.bodyMedium,
+            )
             if (!inLineMode && onShowLine != null) {
                 Button(onClick = onShowLine, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
                     Text("הצג את כל האוטובוסים בקו")
@@ -298,11 +385,23 @@ private fun BusDetails(
     }
 }
 
-private fun updatedAgo(bus: Bus, now: Instant): String {
-    val seconds = java.time.Duration.between(bus.recordedAt, now).seconds.coerceAtLeast(0)
-    return when {
-        seconds < 60 -> "עודכן לפני פחות מדקה"
-        seconds < 120 -> "עודכן לפני דקה"
-        else -> "עודכן לפני ${seconds / 60} דקות"
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LineFilterRow(
+    lines: List<String>,
+    picked: Set<String>,
+    onToggle: (String) -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        FilterChip(selected = picked.isEmpty(), onClick = onClear, label = { Text("כל הקווים") }, colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surface))
+        lines.forEach { line ->
+            FilterChip(selected = line in picked, onClick = { onToggle(line) }, label = { Text(line) }, colors = FilterChipDefaults.filterChipColors(containerColor = MaterialTheme.colorScheme.surface))
+        }
     }
 }

@@ -4,9 +4,17 @@
 
 An Android app that shows, on a live map, every bus currently within a chosen radius of you in Israel.
 
-> Status: project skeleton. The map and live buses arrive in the next stages.
+## What it does
 
-## Planned features
+- Live map (MapLibre + OpenStreetMap) centred on you, with a ring for the search radius (0.5 to 5 km, remembered)
+- Every bus inside the ring, with its line number and an arrow for its heading, refreshed every 30 s while the app is open
+- Colour shows how fresh each position is: green under 2 min, yellow 2 to 3 min, red older
+- Tap a bus for its line, destination, operator and the exact time (to the second) of its last position
+- The tapped bus's route is drawn with its stops; one button shows every bus on that line, anywhere
+- Filter the map to the lines you care about
+- Buses glide to their new positions on each refresh
+
+## Roadmap
 
 | Version | What it adds |
 |---|---|

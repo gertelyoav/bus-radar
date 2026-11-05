@@ -24,6 +24,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.yoav.busradar.circlePoints
 import com.yoav.busradar.data.Bus
+import com.yoav.busradar.data.Freshness
+import androidx.compose.runtime.withFrameNanos
 import com.yoav.busradar.data.RouteInfo
 import com.yoav.busradar.data.RouteStop
 import org.maplibre.android.geometry.LatLngBounds
@@ -67,8 +69,8 @@ private const val BUS_ARROWS = "bus-arrows"
 private const val BUS_LABELS = "bus-labels"
 private const val ARROW_IMAGE = "bus-arrow"
 
-/** Buses not updated for this long are drawn faded. */
-private const val STALE_AFTER_MINUTES = 3
+/** How long a bus takes to glide from its old position to its new one after a refresh. */
+private const val MOVE_ANIMATION_MS = 1_500L
 
 private const val ZOOM_FOR_1_KM = 14.0
 
@@ -76,7 +78,8 @@ private const val ZOOM_FOR_1_KM = 14.0
  * The MapLibre map, wrapped for Compose. Shows the user's [location] as a blue dot, a ring of
  * [radiusKm] around it, and centres on the user the first time a location arrives and whenever
  * [recenterRequests] changes. Each of [buses] is an orange dot with its line number and an arrow
- * for its heading, faded once its position is old. Tapping a bus calls [onBusClick] with its
+ * for its heading, coloured by how recent its position is (green, yellow, red). When new positions
+ * arrive, buses glide from where they were to where they are. Tapping a bus calls [onBusClick] with its
  * vehicle ref; tapping elsewhere calls it with null. [routeStops], if not empty, are drawn as the
  * line's route (straight segments between stops); the camera fits them when [fitRouteRequests] changes.
  */
@@ -105,6 +108,9 @@ fun BusMap(
     var style by remember { mutableStateOf<Style?>(null) }
     var hasCentred by remember { mutableStateOf(false) }
     val currentOnBusClick by rememberUpdatedState(onBusClick)
+    val routesState = rememberUpdatedState(routes)
+    val nowState = rememberUpdatedState(now)
+    val selectedState = rememberUpdatedState(selectedVehicle)
 
     // Forward the screen's lifecycle to the MapView, as MapLibre requires.
     DisposableEffect(lifecycleOwner) {
@@ -163,9 +169,33 @@ fun BusMap(
         }
     }
 
-    LaunchedEffect(buses, routes, now, selectedVehicle, style) {
+    // Where each bus is drawn right now (may be mid-animation), by vehicle ref.
+    val drawn = remember { mutableMapOf<String, Pair<Double, Double>>() }
+
+    LaunchedEffect(buses, style) {
         val s = style ?: return@LaunchedEffect
-        s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, routes, now, selectedVehicle))
+        val source = s.getSourceAs<GeoJsonSource>(BUS_SOURCE) ?: return@LaunchedEffect
+        val from = buses.associate { it.vehicleRef to (drawn[it.vehicleRef] ?: (it.lat to it.lon)) }
+        val start = withFrameNanos { it }
+        while (true) {
+            val elapsedMs = (withFrameNanos { it } - start) / 1_000_000
+            val t = (elapsedMs.toDouble() / MOVE_ANIMATION_MS).coerceIn(0.0, 1.0)
+            val eased = 1 - (1 - t) * (1 - t) // ease-out
+            drawn.clear()
+            buses.forEach { bus ->
+                val (fromLat, fromLon) = from.getValue(bus.vehicleRef)
+                drawn[bus.vehicleRef] = (fromLat + (bus.lat - fromLat) * eased) to (fromLon + (bus.lon - fromLon) * eased)
+            }
+            source.setGeoJson(busFeatures(buses, drawn, routesState.value, nowState.value, selectedState.value))
+            if (t >= 1.0) break
+        }
+    }
+
+    // Colours, labels and selection change without moving anything: just redraw in place.
+    LaunchedEffect(routes, now, selectedVehicle, style) {
+        val s = style ?: return@LaunchedEffect
+        if (drawn.isEmpty()) return@LaunchedEffect
+        s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, drawn, routes, now, selectedVehicle))
     }
 
     LaunchedEffect(routeStops, style) {
@@ -230,16 +260,21 @@ private fun addRadiusLayers(style: Style) {
 
 private fun busFeatures(
     buses: List<Bus>,
+    positions: Map<String, Pair<Double, Double>>,
     routes: Map<Long, RouteInfo>,
     now: Instant,
     selectedVehicle: String?,
 ): FeatureCollection =
     FeatureCollection.fromFeatures(
         buses.map { bus ->
-            Feature.fromGeometry(Point.fromLngLat(bus.lon, bus.lat)).apply {
+            val (lat, lon) = positions[bus.vehicleRef] ?: (bus.lat to bus.lon)
+            val freshness = Freshness.of(bus.recordedAt, now)
+            Feature.fromGeometry(Point.fromLngLat(lon, lat)).apply {
                 addStringProperty("vehicle", bus.vehicleRef)
                 addStringProperty("line", bus.lineRef?.let { routes[it]?.lineNumber } ?: "")
-                addNumberProperty("opacity", if (bus.ageMinutes(now) >= STALE_AFTER_MINUTES) 0.4 else 1.0)
+                addStringProperty("color", freshness.color)
+                // Dark text on yellow, white on green and red, for contrast.
+                addStringProperty("textColor", if (freshness == Freshness.AGING) "#222222" else "#FFFFFF")
                 addBooleanProperty("selected", bus.vehicleRef == selectedVehicle)
                 bus.bearing?.let { addNumberProperty("bearing", it) }
             }
@@ -281,7 +316,6 @@ private fun addBusLayers(style: Style) {
             PropertyFactory.iconOffset(arrayOf(0f, -17f)),
             PropertyFactory.iconAllowOverlap(true),
             PropertyFactory.iconIgnorePlacement(true),
-            PropertyFactory.iconOpacity(Expression.get("opacity")),
         ).withFilter(Expression.has("bearing")),
     )
     style.addLayer(
@@ -289,13 +323,14 @@ private fun addBusLayers(style: Style) {
             PropertyFactory.circleRadius(
                 Expression.switchCase(Expression.get("selected"), Expression.literal(15f), Expression.literal(12f)),
             ),
-            PropertyFactory.circleColor(
-                Expression.switchCase(Expression.get("selected"), Expression.color(0xFF0B5FA5.toInt()), Expression.color(0xFFE8590C.toInt())),
+            PropertyFactory.circleColor(Expression.toColor(Expression.get("color"))),
+            // Selected bus: thick blue ring, so its age colour stays visible.
+            PropertyFactory.circleStrokeColor(
+                Expression.switchCase(Expression.get("selected"), Expression.color(0xFF0B5FA5.toInt()), Expression.color(0xFFFFFFFF.toInt())),
             ),
-            PropertyFactory.circleStrokeColor("#FFFFFF"),
-            PropertyFactory.circleStrokeWidth(2f),
-            PropertyFactory.circleOpacity(Expression.get("opacity")),
-            PropertyFactory.circleStrokeOpacity(Expression.get("opacity")),
+            PropertyFactory.circleStrokeWidth(
+                Expression.switchCase(Expression.get("selected"), Expression.literal(4f), Expression.literal(2f)),
+            ),
         ),
     )
     style.addLayer(
@@ -303,10 +338,9 @@ private fun addBusLayers(style: Style) {
             PropertyFactory.textField(Expression.get("line")),
             PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
             PropertyFactory.textSize(11f),
-            PropertyFactory.textColor("#FFFFFF"),
+            PropertyFactory.textColor(Expression.toColor(Expression.get("textColor"))),
             PropertyFactory.textAllowOverlap(true),
             PropertyFactory.textIgnorePlacement(true),
-            PropertyFactory.textOpacity(Expression.get("opacity")),
         ),
     )
 }
@@ -322,7 +356,7 @@ private fun arrowBitmap(): Bitmap {
         lineTo(6f, size - 8f)
         close()
     }
-    canvas.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE8590C.toInt() })
+    canvas.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF333333.toInt() })
     canvas.drawPath(
         path,
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
