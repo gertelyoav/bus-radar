@@ -1,0 +1,45 @@
+name: Probe bus data
+
+# Manual helper: fetches a live sample from the Open Bus Stride API so we can see the
+# real fields and the actual delay. Run it from the Actions tab ("Run workflow").
+on:
+  workflow_dispatch:
+    inputs:
+      lat:
+        description: Centre latitude
+        default: "32.0853"
+      lon:
+        description: Centre longitude
+        default: "34.7818"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query API
+        env:
+          LAT: ${{ inputs.lat }}
+          LON: ${{ inputs.lon }}
+        run: |
+          set -e
+          API=https://open-bus-stride-api.hasadna.org.il
+          echo "== siri_vehicle_locations/list parameters =="
+          curl -sS "$API/openapi.json" | jq -r '.paths["/siri_vehicle_locations/list"].get.parameters[].name' | tr '\n' ' '; echo
+          echo "== response schema fields =="
+          curl -sS "$API/openapi.json" | jq -r '.components.schemas | to_entries[] | select(.key|test("SiriVehicleLocation")) | .key + ": " + (.value.properties|keys|join(", "))'
+          FROM=$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%S+00:00)
+          D=0.009
+          MINLAT=$(echo "$LAT - $D" | bc); MAXLAT=$(echo "$LAT + $D" | bc)
+          MINLON=$(echo "$LON - 0.011" | bc); MAXLON=$(echo "$LON + 0.011" | bc)
+          URL="$API/siri_vehicle_locations/list?limit=500&order_by=recorded_at_time%20desc&recorded_at_time_from=$FROM&lat__greater_or_equal=$MINLAT&lat__lower_or_equal=$MAXLAT&lon__greater_or_equal=$MINLON&lon__lower_or_equal=$MAXLON"
+          echo "== request =="; echo "$URL"
+          START=$(date +%s%N)
+          curl -sS --max-time 60 "$URL" -o sample.json
+          END=$(date +%s%N)
+          echo "== response time: $(( (END-START)/1000000 )) ms, now: $(date -u +%FT%TZ) =="
+          echo "count: $(jq length sample.json)"
+          echo "newest recorded_at_time: $(jq -r '.[0].recorded_at_time' sample.json)"
+          echo "== first 3 records =="
+          jq '.[0:3]' sample.json
+          echo "== same request with siri_ride join fields (if supported) =="
+          curl -sS --max-time 60 "$URL&limit=2" | jq '.[0]' || true
