@@ -25,6 +25,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.yoav.busradar.circlePoints
 import com.yoav.busradar.data.Bus
 import com.yoav.busradar.data.RouteInfo
+import com.yoav.busradar.data.RouteStop
+import org.maplibre.android.geometry.LatLngBounds
+import org.maplibre.geojson.LineString
 import java.time.Instant
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -54,6 +57,10 @@ private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
 private const val RADIUS_SOURCE = "radius-source"
 private const val RADIUS_FILL = "radius-fill"
 private const val RADIUS_LINE = "radius-line"
+private const val ROUTE_SOURCE = "route-source"
+private const val ROUTE_LINE = "route-line"
+private const val STOPS_SOURCE = "stops-source"
+private const val STOPS_DOTS = "stops-dots"
 private const val BUS_SOURCE = "bus-source"
 private const val BUS_DOTS = "bus-dots"
 private const val BUS_ARROWS = "bus-arrows"
@@ -70,7 +77,8 @@ private const val ZOOM_FOR_1_KM = 14.0
  * [radiusKm] around it, and centres on the user the first time a location arrives and whenever
  * [recenterRequests] changes. Each of [buses] is an orange dot with its line number and an arrow
  * for its heading, faded once its position is old. Tapping a bus calls [onBusClick] with its
- * vehicle ref; tapping elsewhere calls it with null.
+ * vehicle ref; tapping elsewhere calls it with null. [routeStops], if not empty, are drawn as the
+ * line's route (straight segments between stops); the camera fits them when [fitRouteRequests] changes.
  */
 @Composable
 fun BusMap(
@@ -82,6 +90,8 @@ fun BusMap(
     now: Instant,
     selectedVehicle: String?,
     onBusClick: (String?) -> Unit,
+    routeStops: List<RouteStop>,
+    fitRouteRequests: Int,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -121,6 +131,7 @@ fun BusMap(
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(32.0853, 34.7818), 11.0))
             m.setStyle(Style.Builder().fromUri(STYLE_URL)) { loaded ->
                 addRadiusLayers(loaded)
+                addRouteLayers(loaded)
                 addBusLayers(loaded)
                 enableUserDot(context, m, loaded)
                 style = loaded
@@ -155,6 +166,28 @@ fun BusMap(
     LaunchedEffect(buses, routes, now, selectedVehicle, style) {
         val s = style ?: return@LaunchedEffect
         s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, routes, now, selectedVehicle))
+    }
+
+    LaunchedEffect(routeStops, style) {
+        val s = style ?: return@LaunchedEffect
+        val points = routeStops.map { Point.fromLngLat(it.lon, it.lat) }
+        s.getSourceAs<GeoJsonSource>(ROUTE_SOURCE)?.setGeoJson(
+            if (points.size >= 2) FeatureCollection.fromFeature(Feature.fromGeometry(LineString.fromLngLats(points)))
+            else FeatureCollection.fromFeatures(emptyList()),
+        )
+        s.getSourceAs<GeoJsonSource>(STOPS_SOURCE)?.setGeoJson(
+            FeatureCollection.fromFeatures(points.map { Feature.fromGeometry(it) }),
+        )
+    }
+
+    LaunchedEffect(fitRouteRequests, routeStops) {
+        if (fitRouteRequests == 0 || routeStops.size < 2) return@LaunchedEffect
+        val m = map ?: return@LaunchedEffect
+        val bounds = LatLngBounds.Builder().apply {
+            routeStops.forEach { include(LatLng(it.lat, it.lon)) }
+            location?.let { include(LatLng(it.latitude, it.longitude)) }
+        }.build()
+        m.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 80))
     }
 
     LaunchedEffect(recenterRequests) {
@@ -212,6 +245,28 @@ private fun busFeatures(
             }
         },
     )
+
+private fun addRouteLayers(style: Style) {
+    style.addSource(GeoJsonSource(ROUTE_SOURCE))
+    style.addSource(GeoJsonSource(STOPS_SOURCE))
+    style.addLayer(
+        LineLayer(ROUTE_LINE, ROUTE_SOURCE).withProperties(
+            PropertyFactory.lineColor("#0B5FA5"),
+            PropertyFactory.lineWidth(4f),
+            PropertyFactory.lineOpacity(0.75f),
+            PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+        ),
+    )
+    style.addLayer(
+        CircleLayer(STOPS_DOTS, STOPS_SOURCE).withProperties(
+            PropertyFactory.circleRadius(4f),
+            PropertyFactory.circleColor("#FFFFFF"),
+            PropertyFactory.circleStrokeColor("#0B5FA5"),
+            PropertyFactory.circleStrokeWidth(2f),
+        ),
+    )
+}
 
 private fun addBusLayers(style: Style) {
     style.addImage(ARROW_IMAGE, arrowBitmap())

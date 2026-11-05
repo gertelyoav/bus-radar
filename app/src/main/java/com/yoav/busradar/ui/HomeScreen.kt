@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import com.yoav.busradar.data.Bus
 import com.yoav.busradar.data.BusRepository
 import com.yoav.busradar.data.RouteInfo
+import com.yoav.busradar.data.RouteStop
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
@@ -68,6 +69,10 @@ fun HomeScreen() {
     var hasLoadedOnce by remember { mutableStateOf(false) }
     var routes by remember { mutableStateOf<Map<Long, RouteInfo>>(emptyMap()) }
     var selected by remember { mutableStateOf<String?>(null) }
+    // When set, the map shows every bus on this line (any distance) instead of the buses around me.
+    var lineMode by remember { mutableStateOf<Long?>(null) }
+    var routeStops by remember { mutableStateOf<List<RouteStop>>(emptyList()) }
+    var fitRoute by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val launcher = rememberLauncherForActivityResult(
@@ -84,22 +89,33 @@ fun HomeScreen() {
 
     val location by rememberLocation(enabled = permitted)
 
+    // Each refresh gets a number; only the newest one may update the screen, so a slow answer for
+    // the old mode can't overwrite the new one after switching to (or from) a line.
+    var generation by remember { mutableIntStateOf(0) }
+
     fun refresh() {
         val loc = location ?: return
-        if (loading) return
+        val gen = ++generation
         loading = true
         scope.launch {
             try {
                 val now = Instant.now()
-                val fresh = repository.busesAround(loc.latitude, loc.longitude, DEFAULT_RADIUS_KM, now)
+                val line = lineMode
+                val fresh = if (line != null) {
+                    repository.busesOnLine(line, now)
+                } else {
+                    repository.busesAround(loc.latitude, loc.longitude, DEFAULT_RADIUS_KM, now)
+                }
+                if (gen != generation) return@launch
                 buses = fresh
                 fetchedAt = now
                 error = null
-                routes = repository.routesFor(fresh, now)
+                val names = repository.routesFor(fresh, now)
+                if (gen == generation) routes = names
             } catch (e: Exception) {
-                error = "לא הצלחתי לקבל נתונים מממשק הסדנא. נסה לרענן שוב."
+                if (gen == generation) error = "לא הצלחתי לקבל נתונים מממשק הסדנא. נסה לרענן שוב."
             } finally {
-                loading = false
+                if (gen == generation) loading = false
             }
         }
     }
@@ -115,6 +131,35 @@ fun HomeScreen() {
                 delay(REFRESH_INTERVAL_MS)
             }
         }
+    }
+
+    val selectedBus = buses.firstOrNull { it.vehicleRef == selected }
+
+    // Draw the route of the selected bus's line, or of the line being followed.
+    val routeLineRef = lineMode ?: selectedBus?.lineRef
+    LaunchedEffect(routeLineRef) {
+        routeStops = emptyList()
+        if (routeLineRef == null) return@LaunchedEffect
+        routeStops = try {
+            repository.routeStops(routeLineRef)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun enterLineMode(lineRef: Long) {
+        lineMode = lineRef
+        buses = emptyList()
+        fitRoute++
+        refresh()
+    }
+
+    fun exitLineMode() {
+        lineMode = null
+        selected = null
+        buses = emptyList()
+        recenter++
+        refresh()
     }
 
     MaterialTheme {
@@ -144,22 +189,33 @@ fun HomeScreen() {
                     now = fetchedAt,
                     selectedVehicle = selected,
                     onBusClick = { selected = it },
+                    routeStops = routeStops,
+                    fitRouteRequests = fitRoute,
                     modifier = Modifier.fillMaxSize(),
                 )
-                val selectedBus = buses.firstOrNull { it.vehicleRef == selected }
                 if (selectedBus != null) {
                     BusDetails(
                         bus = selectedBus,
                         route = selectedBus.lineRef?.let { routes[it] },
                         now = Instant.now(),
+                        inLineMode = lineMode != null,
+                        onShowLine = selectedBus.lineRef?.let { ref -> { enterLineMode(ref) } },
                         onClose = { selected = null },
                         modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
                     )
                 }
                 if (permitted && hasLoadedOnce) {
+                    val lineName = lineMode?.let { routes[it]?.lineNumber }
+                    val text = when {
+                        error != null -> error!!
+                        loading && buses.isEmpty() -> "טוען אוטובוסים…"
+                        lineMode != null -> "קו ${lineName ?: ""}: ${buses.size} אוטובוסים בדרך"
+                        else -> "${buses.size} אוטובוסים ברדיוס"
+                    }
                     StatusBar(
-                        text = error ?: if (loading && buses.isEmpty()) "טוען אוטובוסים…" else "${buses.size} אוטובוסים ברדיוס",
+                        text = text,
                         isError = error != null,
+                        onExitLine = if (lineMode != null) ({ exitLineMode() }) else null,
                         modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
                     )
                 }
@@ -172,7 +228,7 @@ fun HomeScreen() {
 }
 
 @Composable
-private fun StatusBar(text: String, isError: Boolean, modifier: Modifier = Modifier) {
+private fun StatusBar(text: String, isError: Boolean, onExitLine: (() -> Unit)?, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier,
         shape = MaterialTheme.shapes.medium,
@@ -180,7 +236,12 @@ private fun StatusBar(text: String, isError: Boolean, modifier: Modifier = Modif
         shadowElevation = 3.dp,
         color = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surface,
     ) {
-        Text(text, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
+            if (onExitLine != null) {
+                TextButton(onClick = onExitLine) { Text("חזרה לסביבה שלי") }
+            }
+        }
     }
 }
 
@@ -201,7 +262,15 @@ private fun PermissionNeeded(onRetry: () -> Unit, modifier: Modifier = Modifier)
 }
 
 @Composable
-private fun BusDetails(bus: Bus, route: RouteInfo?, now: Instant, onClose: () -> Unit, modifier: Modifier = Modifier) {
+private fun BusDetails(
+    bus: Bus,
+    route: RouteInfo?,
+    now: Instant,
+    inLineMode: Boolean,
+    onShowLine: (() -> Unit)?,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -220,6 +289,11 @@ private fun BusDetails(bus: Bus, route: RouteInfo?, now: Instant, onClose: () ->
             route?.destination?.let { Text("יעד: $it", style = MaterialTheme.typography.bodyLarge) }
             route?.operator?.let { Text("מפעיל: $it", style = MaterialTheme.typography.bodyMedium) }
             Text(updatedAgo(bus, now), style = MaterialTheme.typography.bodyMedium)
+            if (!inLineMode && onShowLine != null) {
+                Button(onClick = onShowLine, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                    Text("הצג את כל האוטובוסים בקו")
+                }
+            }
         }
     }
 }

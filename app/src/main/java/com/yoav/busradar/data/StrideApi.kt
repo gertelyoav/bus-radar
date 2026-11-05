@@ -33,6 +33,32 @@ interface StrideApi {
         @Query("limit") limit: Int = 1000,
     ): List<GtfsRouteDto>
 
+    /** Live positions of every bus on the given line(s), anywhere in the country. */
+    @GET("siri_vehicle_locations/list")
+    suspend fun vehicleLocationsForLine(
+        @Query("siri_routes__line_ref") lineRefs: String,
+        @Query("recorded_at_time_from") from: String,
+        @Query("recorded_at_time_to") to: String,
+        @Query("order_by") orderBy: String = "recorded_at_time desc",
+        @Query("limit") limit: Int = 2000,
+    ): List<VehicleLocationDto>
+
+    /** Planned rides of a line on a given day; we use one to get the line's stop sequence. */
+    @GET("gtfs_rides/list")
+    suspend fun gtfsRides(
+        @Query("gtfs_route__line_refs") lineRefs: String,
+        @Query("gtfs_route__date_from") dateFrom: String,
+        @Query("gtfs_route__date_to") dateTo: String,
+        @Query("limit") limit: Int = 1,
+    ): List<GtfsRideDto>
+
+    @GET("gtfs_ride_stops/list")
+    suspend fun gtfsRideStops(
+        @Query("gtfs_ride_ids") rideIds: String,
+        @Query("order_by") orderBy: String = "stop_sequence asc",
+        @Query("limit") limit: Int = 500,
+    ): List<GtfsRideStopDto>
+
     companion object {
         const val BASE_URL = "https://open-bus-stride-api.hasadna.org.il/"
 
@@ -61,4 +87,15 @@ data class GtfsRouteDto(
     @SerializedName("route_short_name") val shortName: String? = null,
     @SerializedName("route_long_name") val longName: String? = null,
     @SerializedName("agency_name") val agencyName: String? = null,
+)
+
+data class GtfsRideDto(
+    @SerializedName("id") val id: Long? = null,
+)
+
+data class GtfsRideStopDto(
+    @SerializedName("stop_sequence") val sequence: Int? = null,
+    @SerializedName("gtfs_stop__lat") val lat: Double? = null,
+    @SerializedName("gtfs_stop__lon") val lon: Double? = null,
+    @SerializedName("gtfs_stop__name") val name: String? = null,
 )

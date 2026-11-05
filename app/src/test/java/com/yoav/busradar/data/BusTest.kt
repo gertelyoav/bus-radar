@@ -71,4 +71,22 @@ class BusTest {
         assertEquals(188, bus.bearing)
         assertEquals(9843L, bus.lineRef)
     }
+
+    @Test
+    fun latestBusesHasNoDistanceLimit() {
+        val rows = listOf(row("far", "2026-11-05T17:29:00+00:00", la = 31.0, lo = 35.0))
+        assertEquals(1, latestBuses(rows, now).size)
+        assertTrue(latestBusesWithin(rows, lat, lon, 1.0, now).isEmpty())
+    }
+
+    @Test
+    fun routeStopsAreOrderedAndClean() {
+        val rows = listOf(
+            GtfsRideStopDto(sequence = 2, lat = 32.04, lon = 34.86, name = "b"),
+            GtfsRideStopDto(sequence = 1, lat = 32.03, lon = 34.86, name = "a"),
+            GtfsRideStopDto(sequence = 2, lat = 32.04, lon = 34.86, name = "b"),
+            GtfsRideStopDto(sequence = 3, lat = null, lon = 34.86, name = "bad"),
+        )
+        assertEquals(listOf("a", "b"), routeStopsFrom(rows).map { it.name })
+    }
 }

@@ -38,7 +38,10 @@ fun latestBusesWithin(
     centerLon: Double,
     radiusKm: Double,
     now: Instant,
-): List<Bus> = rows.mapNotNull { row ->
+): List<Bus> = latestBuses(rows, now).filter { distanceKm(centerLat, centerLon, it.lat, it.lon) <= radiusKm }
+
+/** Like [latestBusesWithin] but with no distance limit (used for "all buses on this line"). */
+fun latestBuses(rows: List<VehicleLocationDto>, now: Instant): List<Bus> = rows.mapNotNull { row ->
     val ref = row.vehicleRef ?: return@mapNotNull null
     val lat = row.lat ?: return@mapNotNull null
     val lon = row.lon ?: return@mapNotNull null
@@ -48,5 +51,18 @@ fun latestBusesWithin(
 }
     .groupBy { it.vehicleRef }
     .map { (_, positions) -> positions.maxBy { it.recordedAt } }
-    .filter { distanceKm(centerLat, centerLon, it.lat, it.lon) <= radiusKm }
     .sortedBy { it.vehicleRef }
+
+/** A stop on a line's route, in travel order. */
+data class RouteStop(val sequence: Int, val lat: Double, val lon: Double, val name: String?)
+
+/** Valid stops in travel order, without duplicates of the same sequence number. */
+fun routeStopsFrom(rows: List<GtfsRideStopDto>): List<RouteStop> = rows
+    .mapNotNull { r ->
+        val seq = r.sequence ?: return@mapNotNull null
+        val lat = r.lat ?: return@mapNotNull null
+        val lon = r.lon ?: return@mapNotNull null
+        RouteStop(seq, lat, lon, r.name)
+    }
+    .distinctBy { it.sequence }
+    .sortedBy { it.sequence }

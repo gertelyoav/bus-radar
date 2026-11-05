@@ -27,6 +27,34 @@ class BusRepository(private val api: StrideApi = StrideApi.create()) {
         return latestBusesWithin(rows, lat, lon, radiusKm, now)
     }
 
+    /** Every bus currently on [lineRef] (this direction of the line), anywhere. */
+    suspend fun busesOnLine(lineRef: Long, now: Instant = Instant.now()): List<Bus> {
+        val rows = api.vehicleLocationsForLine(
+            lineRefs = lineRef.toString(),
+            from = now.minus(LOOKBACK).truncatedTo(ChronoUnit.SECONDS).toString(),
+            to = now.plus(Duration.ofMinutes(1)).truncatedTo(ChronoUnit.SECONDS).toString(),
+        )
+        return latestBuses(rows, now)
+    }
+
+    private val stopsCache = mutableMapOf<Long, List<RouteStop>>()
+    private var stopsDay: LocalDate? = null
+
+    /** The line's stops in order, from one of today's planned rides. Cached per line per day. */
+    suspend fun routeStops(lineRef: Long, now: Instant = Instant.now()): List<RouteStop> {
+        val today = now.atZone(ISRAEL).toLocalDate()
+        if (stopsDay != today) {
+            stopsCache.clear()
+            stopsDay = today
+        }
+        stopsCache[lineRef]?.let { return it }
+        val rideId = api.gtfsRides(lineRef.toString(), today.toString(), today.toString())
+            .firstNotNullOfOrNull { it.id } ?: return emptyList()
+        val stops = routeStopsFrom(api.gtfsRideStops(rideId.toString()))
+        if (stops.isNotEmpty()) stopsCache[lineRef] = stops
+        return stops
+    }
+
     /**
      * Line details for [buses], fetching only line refs not seen yet today. If the lookup fails the
      * map still shows the buses, just without line numbers, so errors here are swallowed.
