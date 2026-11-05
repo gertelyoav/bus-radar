@@ -17,6 +17,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.yoav.busradar.circlePoints
+import com.yoav.busradar.data.Bus
+import java.time.Instant
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
@@ -26,10 +28,14 @@ import org.maplibre.android.location.modes.RenderMode
 import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import org.maplibre.android.style.expressions.Expression
+import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.Point
 import org.maplibre.geojson.Polygon
 
@@ -39,19 +45,26 @@ private const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
 private const val RADIUS_SOURCE = "radius-source"
 private const val RADIUS_FILL = "radius-fill"
 private const val RADIUS_LINE = "radius-line"
+private const val BUS_SOURCE = "bus-source"
+private const val BUS_DOTS = "bus-dots"
+
+/** Buses not updated for this long are drawn faded. */
+private const val STALE_AFTER_MINUTES = 3
 
 private const val ZOOM_FOR_1_KM = 14.0
 
 /**
  * The MapLibre map, wrapped for Compose. Shows the user's [location] as a blue dot, a ring of
  * [radiusKm] around it, and centres on the user the first time a location arrives and whenever
- * [recenterRequests] changes.
+ * [recenterRequests] changes. Each of [buses] is an orange dot, faded once its position is old.
  */
 @Composable
 fun BusMap(
     location: Location?,
     radiusKm: Double,
     recenterRequests: Int,
+    buses: List<Bus>,
+    now: Instant,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -90,6 +103,7 @@ fun BusMap(
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(32.0853, 34.7818), 11.0))
             m.setStyle(Style.Builder().fromUri(STYLE_URL)) { loaded ->
                 addRadiusLayers(loaded)
+                addBusLayer(loaded)
                 enableUserDot(context, m, loaded)
                 style = loaded
             }
@@ -108,6 +122,11 @@ fun BusMap(
             m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), zoomFor(radiusKm)))
             hasCentred = true
         }
+    }
+
+    LaunchedEffect(buses, now, style) {
+        val s = style ?: return@LaunchedEffect
+        s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, now))
     }
 
     LaunchedEffect(recenterRequests) {
@@ -144,6 +163,30 @@ private fun addRadiusLayers(style: Style) {
             PropertyFactory.lineColor("#1B8A5A"),
             PropertyFactory.lineWidth(2f),
             PropertyFactory.lineOpacity(0.7f),
+        ),
+    )
+}
+
+private fun busFeatures(buses: List<Bus>, now: Instant): FeatureCollection =
+    FeatureCollection.fromFeatures(
+        buses.map { bus ->
+            Feature.fromGeometry(Point.fromLngLat(bus.lon, bus.lat)).apply {
+                addStringProperty("vehicle", bus.vehicleRef)
+                addNumberProperty("opacity", if (bus.ageMinutes(now) >= STALE_AFTER_MINUTES) 0.35 else 1.0)
+            }
+        },
+    )
+
+private fun addBusLayer(style: Style) {
+    style.addSource(GeoJsonSource(BUS_SOURCE))
+    style.addLayer(
+        CircleLayer(BUS_DOTS, BUS_SOURCE).withProperties(
+            PropertyFactory.circleRadius(7f),
+            PropertyFactory.circleColor("#E8590C"),
+            PropertyFactory.circleStrokeColor("#FFFFFF"),
+            PropertyFactory.circleStrokeWidth(2f),
+            PropertyFactory.circleOpacity(Expression.get("opacity")),
+            PropertyFactory.circleStrokeOpacity(Expression.get("opacity")),
         ),
     )
 }

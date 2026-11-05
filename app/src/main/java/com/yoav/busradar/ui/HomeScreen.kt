@@ -8,10 +8,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -19,15 +22,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.yoav.busradar.data.Bus
+import com.yoav.busradar.data.BusRepository
 import com.yoav.busradar.location.hasLocationPermission
 import com.yoav.busradar.location.rememberLocation
 import com.yoav.busradar.map.BusMap
+import kotlinx.coroutines.launch
+import java.time.Instant
 
 /** Default search radius, per the plan. Becomes user-adjustable in version 3. */
 const val DEFAULT_RADIUS_KM = 1.0
@@ -35,9 +43,18 @@ const val DEFAULT_RADIUS_KM = 1.0
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val repository = remember { BusRepository() }
+
     var permitted by remember { mutableStateOf(hasLocationPermission(context)) }
     var asked by remember { mutableStateOf(false) }
     var recenter by remember { mutableIntStateOf(0) }
+
+    var buses by remember { mutableStateOf<List<Bus>>(emptyList()) }
+    var fetchedAt by remember { mutableStateOf(Instant.now()) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var hasLoadedOnce by remember { mutableStateOf(false) }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -45,22 +62,54 @@ fun HomeScreen() {
         asked = true
         permitted = result.values.any { it }
     }
+    val askPermission = {
+        launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+    }
 
-    LaunchedEffect(Unit) {
-        if (!permitted) {
-            launcher.launch(
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
-            )
+    LaunchedEffect(Unit) { if (!permitted) askPermission() }
+
+    val location by rememberLocation(enabled = permitted)
+
+    fun refresh() {
+        val loc = location ?: return
+        if (loading) return
+        loading = true
+        scope.launch {
+            try {
+                val now = Instant.now()
+                buses = repository.busesAround(loc.latitude, loc.longitude, DEFAULT_RADIUS_KM, now)
+                fetchedAt = now
+                error = null
+            } catch (e: Exception) {
+                error = "לא הצלחתי לקבל נתונים מממשק הסדנא. נסה לרענן שוב."
+            } finally {
+                loading = false
+            }
         }
     }
 
-    val location by rememberLocation(enabled = permitted)
+    // First load as soon as we know where the user is. Version 1 refreshes manually after that.
+    LaunchedEffect(location != null) {
+        if (location != null && !hasLoadedOnce) {
+            hasLoadedOnce = true
+            refresh()
+        }
+    }
 
     MaterialTheme {
         Scaffold(
             floatingActionButton = {
                 if (permitted) {
-                    SmallFloatingActionButton(onClick = { recenter++ }) { Text("◎") }
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp), horizontalAlignment = Alignment.End) {
+                        SmallFloatingActionButton(onClick = { recenter++ }) { Text("◎") }
+                        SmallFloatingActionButton(onClick = { refresh() }) {
+                            if (loading) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text("⟳")
+                            }
+                        }
+                    }
                 }
             },
         ) { padding ->
@@ -69,23 +118,35 @@ fun HomeScreen() {
                     location = location,
                     radiusKm = DEFAULT_RADIUS_KM,
                     recenterRequests = recenter,
+                    buses = buses,
+                    now = fetchedAt,
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (!permitted && asked) {
-                    PermissionNeeded(
-                        onRetry = {
-                            launcher.launch(
-                                arrayOf(
-                                    Manifest.permission.ACCESS_FINE_LOCATION,
-                                    Manifest.permission.ACCESS_COARSE_LOCATION,
-                                ),
-                            )
-                        },
-                        modifier = Modifier.align(Alignment.Center),
+                if (permitted && hasLoadedOnce) {
+                    StatusBar(
+                        text = error ?: if (loading && buses.isEmpty()) "טוען אוטובוסים…" else "${buses.size} אוטובוסים ברדיוס",
+                        isError = error != null,
+                        modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
                     )
+                }
+                if (!permitted && asked) {
+                    PermissionNeeded(onRetry = askPermission, modifier = Modifier.align(Alignment.Center))
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun StatusBar(text: String, isError: Boolean, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.medium,
+        tonalElevation = 3.dp,
+        shadowElevation = 3.dp,
+        color = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surface,
+    ) {
+        Text(text, modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp), style = MaterialTheme.typography.bodyMedium)
     }
 }
 
