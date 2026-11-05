@@ -28,10 +28,11 @@ jobs:
           echo "== response schema fields =="
           curl -sS "$API/openapi.json" | jq -r '.components.schemas | to_entries[] | select(.key|test("SiriVehicleLocation")) | .key + ": " + (.value.properties|keys|join(", "))'
           FROM=$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%SZ)
+          TO=$(date -u -d '+1 min' +%Y-%m-%dT%H:%M:%SZ)
           D=0.009
           MINLAT=$(echo "$LAT - $D" | bc); MAXLAT=$(echo "$LAT + $D" | bc)
           MINLON=$(echo "$LON - 0.011" | bc); MAXLON=$(echo "$LON + 0.011" | bc)
-          URL="$API/siri_vehicle_locations/list?limit=500&order_by=recorded_at_time%20desc&recorded_at_time_from=$FROM&lat__greater_or_equal=$MINLAT&lat__lower_or_equal=$MAXLAT&lon__greater_or_equal=$MINLON&lon__lower_or_equal=$MAXLON"
+          URL="$API/siri_vehicle_locations/list?limit=500&order_by=recorded_at_time%20desc&recorded_at_time_from=$FROM&recorded_at_time_to=$TO&lat__greater_or_equal=$MINLAT&lat__lower_or_equal=$MAXLAT&lon__greater_or_equal=$MINLON&lon__lower_or_equal=$MAXLON"
           echo "== request =="; echo "$URL"
           START=$(date +%s%N)
           curl -sS --max-time 60 "$URL" -o sample.json
@@ -41,6 +42,8 @@ jobs:
           echo "count: $(jq length sample.json)"
           echo "distinct vehicles: $(jq '[.[].siri_ride__vehicle_ref]|unique|length' sample.json)"
           echo "newest recorded_at_time: $(jq -r '.[0].recorded_at_time' sample.json)"
+          echo "oldest recorded_at_time: $(jq -r '.[-1].recorded_at_time' sample.json)"
+          echo "newest snapshot: $(jq -r '.[0].siri_snapshot__snapshot_id' sample.json)"
           echo "== first 2 records =="
           jq '.[0:2]' sample.json
           LINE_REF=$(jq -r '.[0].siri_route__line_ref' sample.json)
@@ -48,5 +51,9 @@ jobs:
           TODAY=$(date -u +%F)
           echo "== gtfs_routes for line_ref $LINE_REF operator $OP_REF =="
           curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&date_from=$TODAY&date_to=$TODAY&limit=3" | jq '.'
+          echo "== gtfs_routes by line_ref, no date filter =="
+          curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&limit=2&order_by=date%20desc" | jq '.'
+          echo "== latest siri snapshots =="
+          curl -sS --max-time 60 "$API/siri_snapshots/list?limit=3&order_by=id%20desc" | jq -c '.[] | {snapshot_id, etl_status, etl_end_time}' || true
           echo "== gtfs_routes/list parameters =="
           curl -sS "$API/openapi.json" | jq -r '.paths["/gtfs_routes/list"].get.parameters[].name' | tr '\n' ' '; echo
