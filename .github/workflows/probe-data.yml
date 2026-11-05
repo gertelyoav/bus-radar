@@ -51,6 +51,9 @@ jobs:
           TODAY=$(date -u +%F)
           echo "== gtfs_routes for line_ref $LINE_REF operator $OP_REF =="
           curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&date_from=$TODAY&date_to=$TODAY&limit=3" | jq '.'
+          REFS=$(jq -r '[.[].siri_route__line_ref]|unique|.[0:5]|join(",")' sample.json)
+          echo "== gtfs_routes for several line_refs at once: $REFS =="
+          curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$REFS&date_from=$TODAY&date_to=$TODAY&limit=20" | jq -c '.[] | {line_ref, route_short_name, agency_name}'
           echo "== gtfs_routes by line_ref, no date filter =="
           curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&limit=2&order_by=date%20desc" | jq '.'
           echo "== latest siri snapshots =="
