@@ -39,3 +39,18 @@ fun distanceKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
     val a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
     return 2 * r * asin(sqrt(a))
 }
+
+/**
+ * Points (lat, lon) of a circle of [radiusKm] around ([lat], [lon]), first point repeated at
+ * the end so it closes as a polygon. Used to draw the radius ring on the map.
+ */
+fun circlePoints(lat: Double, lon: Double, radiusKm: Double, segments: Int = 64): List<Pair<Double, Double>> {
+    require(segments >= 3) { "segments must be at least 3" }
+    val dLat = radiusKm / 111.0
+    val dLon = radiusKm / (111.0 * cos(lat * PI / 180.0))
+    val points = (0 until segments).map { i ->
+        val angle = 2 * PI * i / segments
+        Pair(lat + dLat * sin(angle), lon + dLon * cos(angle))
+    }
+    return points + points.first()
+}

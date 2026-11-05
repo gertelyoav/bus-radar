@@ -12,8 +12,8 @@ android {
         applicationId = "com.yoav.busradar"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     signingConfigs {
@@ -57,6 +57,8 @@ dependencies {
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.maplibre)
+    implementation(libs.play.services.location)
     debugImplementation(libs.androidx.ui.tooling)
 
     testImplementation(libs.junit)

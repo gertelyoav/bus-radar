@@ -2,5 +2,5 @@ package com.yoav.busradar
 
 /** Human-readable version shown in the app; keep in sync with versionName in app/build.gradle.kts. */
 object BuildConfigInfo {
-    const val VERSION = "0.1.0"
+    const val VERSION = "0.2.0"
 }

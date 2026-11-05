@@ -39,3 +39,18 @@ class BoundingBoxTest {
         assertEquals(0.0, distanceKm(lat, lon, lat, lon), 1e-9)
     }
 }
+
+class CirclePointsTest {
+    @Test
+    fun pointsAreOneRadiusFromCentre() {
+        val points = circlePoints(32.08, 34.78, 1.0)
+        points.forEach { (la, lo) -> assertEquals(1.0, distanceKm(32.08, 34.78, la, lo), 0.02) }
+    }
+
+    @Test
+    fun ringIsClosed() {
+        val points = circlePoints(32.08, 34.78, 1.0, segments = 16)
+        assertEquals(17, points.size)
+        assertEquals(points.first(), points.last())
+    }
+}
