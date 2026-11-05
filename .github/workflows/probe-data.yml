@@ -54,6 +54,25 @@ jobs:
           REFS=$(jq -r '[.[].siri_route__line_ref]|unique|.[0:5]|join(",")' sample.json)
           echo "== gtfs_routes for several line_refs at once: $REFS =="
           curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$REFS&date_from=$TODAY&date_to=$TODAY&limit=20" | jq -c '.[] | {line_ref, route_short_name, agency_name}'
+          echo "== all API paths =="
+          curl -sS "$API/openapi.json" | jq -r '.paths | keys[]' | tr '\n' ' '; echo
+          for P in gtfs_rides gtfs_ride_stops gtfs_stops; do
+            echo "== $P/list parameters =="
+            curl -sS "$API/openapi.json" | jq -r --arg p "/$P/list" '.paths[$p].get.parameters[].name' | tr '\n' ' '; echo
+          done
+          ROUTE_ID=$(curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&date_from=$TODAY&date_to=$TODAY&limit=1" | jq -r '.[0].id')
+          MKT=$(curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&date_from=$TODAY&date_to=$TODAY&limit=1" | jq -r '.[0].route_mkt')
+          echo "== routes sharing route_mkt $MKT today =="
+          curl -sS --max-time 60 "$API/gtfs_routes/list?route_mkt=$MKT&date_from=$TODAY&date_to=$TODAY&limit=20" | jq -c '.[] | {id, line_ref, route_short_name, route_direction, route_alternative, route_long_name}'
+          echo "== one gtfs_ride for route id $ROUTE_ID =="
+          curl -sS --max-time 60 "$API/gtfs_rides/list?gtfs_route_id=$ROUTE_ID&limit=1" | tee ride.json | jq '.'
+          RIDE_ID=$(jq -r '.[0].id' ride.json)
+          echo "== ride stops for ride $RIDE_ID (first 3, count) =="
+          curl -sS --max-time 60 "$API/gtfs_ride_stops/list?gtfs_ride_ids=$RIDE_ID&limit=500" | tee stops.json | jq '.[0:3]'
+          echo "stop count: $(jq length stops.json)"
+          echo "== live buses on line_ref $LINE_REF anywhere, last 5 min =="
+          F5=$(date -u -d '-5 min' +%Y-%m-%dT%H:%M:%SZ)
+          curl -sS --max-time 60 "$API/siri_vehicle_locations/list?siri_routes__line_ref=$LINE_REF&recorded_at_time_from=$F5&recorded_at_time_to=$TO&limit=500&order_by=recorded_at_time%20desc" | jq '[.[].siri_ride__vehicle_ref]|unique|length'
           echo "== gtfs_routes by line_ref, no date filter =="
           curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&limit=2&order_by=date%20desc" | jq '.'
           echo "== latest siri snapshots =="
