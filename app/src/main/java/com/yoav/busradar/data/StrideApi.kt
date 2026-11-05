@@ -24,6 +24,15 @@ interface StrideApi {
         @Query("limit") limit: Int = 2000,
     ): List<VehicleLocationDto>
 
+    /** Static route info (line number, operator, names) for the given internal line refs. */
+    @GET("gtfs_routes/list")
+    suspend fun gtfsRoutes(
+        @Query("line_refs") lineRefs: String, // comma-separated
+        @Query("date_from") dateFrom: String,
+        @Query("date_to") dateTo: String,
+        @Query("limit") limit: Int = 1000,
+    ): List<GtfsRouteDto>
+
     companion object {
         const val BASE_URL = "https://open-bus-stride-api.hasadna.org.il/"
 
@@ -45,4 +54,11 @@ data class VehicleLocationDto(
     @SerializedName("siri_ride__vehicle_ref") val vehicleRef: String? = null,
     @SerializedName("siri_route__line_ref") val lineRef: Long? = null,
     @SerializedName("siri_route__operator_ref") val operatorRef: Long? = null,
+)
+
+data class GtfsRouteDto(
+    @SerializedName("line_ref") val lineRef: Long? = null,
+    @SerializedName("route_short_name") val shortName: String? = null,
+    @SerializedName("route_long_name") val longName: String? = null,
+    @SerializedName("agency_name") val agencyName: String? = null,
 )

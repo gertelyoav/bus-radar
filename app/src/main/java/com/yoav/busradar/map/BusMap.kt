@@ -1,6 +1,11 @@
 package com.yoav.busradar.map
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.location.Location
 import android.os.Bundle
 import androidx.compose.runtime.Composable
@@ -9,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -18,6 +24,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.yoav.busradar.circlePoints
 import com.yoav.busradar.data.Bus
+import com.yoav.busradar.data.RouteInfo
 import java.time.Instant
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -32,6 +39,8 @@ import org.maplibre.android.style.expressions.Expression
 import org.maplibre.android.style.layers.CircleLayer
 import org.maplibre.android.style.layers.FillLayer
 import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.Property
+import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
@@ -47,6 +56,9 @@ private const val RADIUS_FILL = "radius-fill"
 private const val RADIUS_LINE = "radius-line"
 private const val BUS_SOURCE = "bus-source"
 private const val BUS_DOTS = "bus-dots"
+private const val BUS_ARROWS = "bus-arrows"
+private const val BUS_LABELS = "bus-labels"
+private const val ARROW_IMAGE = "bus-arrow"
 
 /** Buses not updated for this long are drawn faded. */
 private const val STALE_AFTER_MINUTES = 3
@@ -56,7 +68,9 @@ private const val ZOOM_FOR_1_KM = 14.0
 /**
  * The MapLibre map, wrapped for Compose. Shows the user's [location] as a blue dot, a ring of
  * [radiusKm] around it, and centres on the user the first time a location arrives and whenever
- * [recenterRequests] changes. Each of [buses] is an orange dot, faded once its position is old.
+ * [recenterRequests] changes. Each of [buses] is an orange dot with its line number and an arrow
+ * for its heading, faded once its position is old. Tapping a bus calls [onBusClick] with its
+ * vehicle ref; tapping elsewhere calls it with null.
  */
 @Composable
 fun BusMap(
@@ -64,7 +78,10 @@ fun BusMap(
     radiusKm: Double,
     recenterRequests: Int,
     buses: List<Bus>,
+    routes: Map<Long, RouteInfo>,
     now: Instant,
+    selectedVehicle: String?,
+    onBusClick: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -77,6 +94,7 @@ fun BusMap(
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var style by remember { mutableStateOf<Style?>(null) }
     var hasCentred by remember { mutableStateOf(false) }
+    val currentOnBusClick by rememberUpdatedState(onBusClick)
 
     // Forward the screen's lifecycle to the MapView, as MapLibre requires.
     DisposableEffect(lifecycleOwner) {
@@ -103,9 +121,19 @@ fun BusMap(
             m.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(32.0853, 34.7818), 11.0))
             m.setStyle(Style.Builder().fromUri(STYLE_URL)) { loaded ->
                 addRadiusLayers(loaded)
-                addBusLayer(loaded)
+                addBusLayers(loaded)
                 enableUserDot(context, m, loaded)
                 style = loaded
+            }
+            m.addOnMapClickListener { point ->
+                val screen = m.projection.toScreenLocation(point)
+                val touch = 28f
+                val hits = m.queryRenderedFeatures(
+                    RectF(screen.x - touch, screen.y - touch, screen.x + touch, screen.y + touch),
+                    BUS_DOTS,
+                )
+                currentOnBusClick(hits.firstOrNull()?.getStringProperty("vehicle"))
+                true
             }
             map = m
         }
@@ -124,9 +152,9 @@ fun BusMap(
         }
     }
 
-    LaunchedEffect(buses, now, style) {
+    LaunchedEffect(buses, routes, now, selectedVehicle, style) {
         val s = style ?: return@LaunchedEffect
-        s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, now))
+        s.getSourceAs<GeoJsonSource>(BUS_SOURCE)?.setGeoJson(busFeatures(buses, routes, now, selectedVehicle))
     }
 
     LaunchedEffect(recenterRequests) {
@@ -167,28 +195,88 @@ private fun addRadiusLayers(style: Style) {
     )
 }
 
-private fun busFeatures(buses: List<Bus>, now: Instant): FeatureCollection =
+private fun busFeatures(
+    buses: List<Bus>,
+    routes: Map<Long, RouteInfo>,
+    now: Instant,
+    selectedVehicle: String?,
+): FeatureCollection =
     FeatureCollection.fromFeatures(
         buses.map { bus ->
             Feature.fromGeometry(Point.fromLngLat(bus.lon, bus.lat)).apply {
                 addStringProperty("vehicle", bus.vehicleRef)
-                addNumberProperty("opacity", if (bus.ageMinutes(now) >= STALE_AFTER_MINUTES) 0.35 else 1.0)
+                addStringProperty("line", bus.lineRef?.let { routes[it]?.lineNumber } ?: "")
+                addNumberProperty("opacity", if (bus.ageMinutes(now) >= STALE_AFTER_MINUTES) 0.4 else 1.0)
+                addBooleanProperty("selected", bus.vehicleRef == selectedVehicle)
+                bus.bearing?.let { addNumberProperty("bearing", it) }
             }
         },
     )
 
-private fun addBusLayer(style: Style) {
+private fun addBusLayers(style: Style) {
+    style.addImage(ARROW_IMAGE, arrowBitmap())
     style.addSource(GeoJsonSource(BUS_SOURCE))
+
+    // Heading arrow: a small triangle pushed out from the dot and rotated to the bus's bearing.
+    style.addLayer(
+        SymbolLayer(BUS_ARROWS, BUS_SOURCE).withProperties(
+            PropertyFactory.iconImage(ARROW_IMAGE),
+            PropertyFactory.iconRotate(Expression.get("bearing")),
+            PropertyFactory.iconRotationAlignment(Property.ICON_ROTATION_ALIGNMENT_MAP),
+            PropertyFactory.iconOffset(arrayOf(0f, -17f)),
+            PropertyFactory.iconAllowOverlap(true),
+            PropertyFactory.iconIgnorePlacement(true),
+            PropertyFactory.iconOpacity(Expression.get("opacity")),
+        ).withFilter(Expression.has("bearing")),
+    )
     style.addLayer(
         CircleLayer(BUS_DOTS, BUS_SOURCE).withProperties(
-            PropertyFactory.circleRadius(7f),
-            PropertyFactory.circleColor("#E8590C"),
+            PropertyFactory.circleRadius(
+                Expression.switchCase(Expression.get("selected"), Expression.literal(15f), Expression.literal(12f)),
+            ),
+            PropertyFactory.circleColor(
+                Expression.switchCase(Expression.get("selected"), Expression.color(0xFF0B5FA5.toInt()), Expression.color(0xFFE8590C.toInt())),
+            ),
             PropertyFactory.circleStrokeColor("#FFFFFF"),
             PropertyFactory.circleStrokeWidth(2f),
             PropertyFactory.circleOpacity(Expression.get("opacity")),
             PropertyFactory.circleStrokeOpacity(Expression.get("opacity")),
         ),
     )
+    style.addLayer(
+        SymbolLayer(BUS_LABELS, BUS_SOURCE).withProperties(
+            PropertyFactory.textField(Expression.get("line")),
+            PropertyFactory.textFont(arrayOf("Noto Sans Bold")),
+            PropertyFactory.textSize(11f),
+            PropertyFactory.textColor("#FFFFFF"),
+            PropertyFactory.textAllowOverlap(true),
+            PropertyFactory.textIgnorePlacement(true),
+            PropertyFactory.textOpacity(Expression.get("opacity")),
+        ),
+    )
+}
+
+/** A filled triangle pointing up (north before rotation). */
+private fun arrowBitmap(): Bitmap {
+    val size = 36
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val path = Path().apply {
+        moveTo(size / 2f, 2f)
+        lineTo(size - 6f, size - 8f)
+        lineTo(6f, size - 8f)
+        close()
+    }
+    canvas.drawPath(path, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFE8590C.toInt() })
+    canvas.drawPath(
+        path,
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        },
+    )
+    return bitmap
 }
 
 /** Blue "you are here" dot, fed from our own FusedLocationProvider updates. */
