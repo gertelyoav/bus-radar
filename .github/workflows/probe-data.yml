@@ -27,7 +27,7 @@ jobs:
           curl -sS "$API/openapi.json" | jq -r '.paths["/siri_vehicle_locations/list"].get.parameters[].name' | tr '\n' ' '; echo
           echo "== response schema fields =="
           curl -sS "$API/openapi.json" | jq -r '.components.schemas | to_entries[] | select(.key|test("SiriVehicleLocation")) | .key + ": " + (.value.properties|keys|join(", "))'
-          FROM=$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%S+00:00)
+          FROM=$(date -u -d '-10 min' +%Y-%m-%dT%H:%M:%SZ)
           D=0.009
           MINLAT=$(echo "$LAT - $D" | bc); MAXLAT=$(echo "$LAT + $D" | bc)
           MINLON=$(echo "$LON - 0.011" | bc); MAXLON=$(echo "$LON + 0.011" | bc)
@@ -37,9 +37,16 @@ jobs:
           curl -sS --max-time 60 "$URL" -o sample.json
           END=$(date +%s%N)
           echo "== response time: $(( (END-START)/1000000 )) ms, now: $(date -u +%FT%TZ) =="
+          if ! jq -e 'type=="array"' sample.json >/dev/null; then echo "unexpected response:"; cat sample.json; exit 1; fi
           echo "count: $(jq length sample.json)"
+          echo "distinct vehicles: $(jq '[.[].siri_ride__vehicle_ref]|unique|length' sample.json)"
           echo "newest recorded_at_time: $(jq -r '.[0].recorded_at_time' sample.json)"
-          echo "== first 3 records =="
-          jq '.[0:3]' sample.json
-          echo "== same request with siri_ride join fields (if supported) =="
-          curl -sS --max-time 60 "$URL&limit=2" | jq '.[0]' || true
+          echo "== first 2 records =="
+          jq '.[0:2]' sample.json
+          LINE_REF=$(jq -r '.[0].siri_route__line_ref' sample.json)
+          OP_REF=$(jq -r '.[0].siri_route__operator_ref' sample.json)
+          TODAY=$(date -u +%F)
+          echo "== gtfs_routes for line_ref $LINE_REF operator $OP_REF =="
+          curl -sS --max-time 60 "$API/gtfs_routes/list?line_refs=$LINE_REF&date_from=$TODAY&date_to=$TODAY&limit=3" | jq '.'
+          echo "== gtfs_routes/list parameters =="
+          curl -sS "$API/openapi.json" | jq -r '.paths["/gtfs_routes/list"].get.parameters[].name' | tr '\n' ' '; echo
